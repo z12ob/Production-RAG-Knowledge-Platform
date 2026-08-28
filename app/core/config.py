@@ -1,7 +1,8 @@
 from enum import StrEnum
 from functools import lru_cache
-from typing import Literal
+from typing import Annotated, Literal
 
+from pydantic import Field, PostgresDsn
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -23,8 +24,10 @@ class Settings(BaseSettings):
     app_version: str = "0.1.0"
     environment: Environment = Environment.DEVELOPMENT
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+    database_url: PostgresDsn
+    database_connect_timeout_seconds: Annotated[int, Field(ge=1, le=30)] = 5
 
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    return Settings.model_validate({})
