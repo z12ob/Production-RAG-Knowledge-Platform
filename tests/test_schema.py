@@ -61,3 +61,35 @@ def test_document_constraints_and_listing_index_exist_in_postgresql() -> None:
     assert any(item["column_names"] == ["storage_key"] for item in unique_constraints)
     indexes = inspector.get_indexes("documents")
     assert any(item["column_names"] == ["knowledge_base_id"] for item in indexes)
+
+
+def test_ingestion_job_constraints_and_document_relationship_exist_in_postgresql() -> None:
+    inspector = inspect(engine)
+    assert "ingestion_jobs" in inspector.get_table_names()
+
+    columns = {column["name"]: column for column in inspector.get_columns("ingestion_jobs")}
+    assert columns["document_id"]["nullable"] is False
+    assert columns["status"]["nullable"] is False
+    assert columns["attempt_count"]["nullable"] is False
+
+    foreign_key = next(
+        item
+        for item in inspector.get_foreign_keys("ingestion_jobs")
+        if item["constrained_columns"] == ["document_id"]
+    )
+    assert foreign_key["referred_table"] == "documents"
+    assert foreign_key["referred_columns"] == ["id"]
+    assert foreign_key["options"]["ondelete"] == "CASCADE"
+
+    unique_constraints = inspector.get_unique_constraints("ingestion_jobs")
+    assert any(item["column_names"] == ["document_id"] for item in unique_constraints)
+    constraint_names = {
+        constraint["name"] for constraint in inspector.get_check_constraints("ingestion_jobs")
+    }
+    assert {
+        "attempt_count_nonnegative",
+        "completion_matches_status",
+        "failure_code_length",
+        "failure_code_matches_status",
+        "status_valid",
+    } <= constraint_names

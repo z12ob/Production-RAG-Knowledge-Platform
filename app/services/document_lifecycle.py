@@ -3,6 +3,7 @@ import logging
 from sqlalchemy.orm import Session
 
 from app.models.document import Document
+from app.models.ingestion_job import IngestionJob
 from app.storage.local import LocalFileStorage, StorageError
 
 logger = logging.getLogger(__name__)
@@ -12,8 +13,9 @@ def commit_uploaded_document(
     session: Session,
     storage: LocalFileStorage,
     document: Document,
+    ingestion_job: IngestionJob,
 ) -> None:
-    session.add(document)
+    session.add_all([document, ingestion_job])
     try:
         session.commit()
     except Exception:

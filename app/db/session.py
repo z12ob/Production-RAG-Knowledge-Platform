@@ -1,5 +1,6 @@
 import logging
 from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, status
@@ -43,3 +44,13 @@ def get_db_session() -> Iterator[Session]:
 
 
 DatabaseSession = Annotated[Session, Depends(get_db_session)]
+
+
+@contextmanager
+def worker_session_scope() -> Iterator[Session]:
+    with session_factory() as session:
+        try:
+            yield session
+        except Exception:
+            session.rollback()
+            raise

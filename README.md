@@ -4,12 +4,12 @@ A knowledge platform being built in small, reviewable layers. The finished appli
 to support authenticated knowledge bases, asynchronous document processing, hybrid retrieval, and
 grounded answers with source references.
 
-> Current phase: Secure Document Uploads
+> Current phase: Background Processing
 
 This is not yet a RAG system or a production deployment. The current repository demonstrates a
-typed HTTP API, authenticated per-user ownership, PostgreSQL document metadata, and controlled local
-file storage. Future capabilities are listed separately so the codebase never claims work that has
-not been implemented.
+typed HTTP API, authenticated per-user ownership, controlled document storage, and Redis-backed
+background integrity checks with PostgreSQL job state. Future capabilities are listed separately so
+the codebase never claims work that has not been implemented.
 
 ## Implemented now
 
@@ -32,6 +32,12 @@ not been implemented.
 - generated storage keys that do not depend on untrusted filenames
 - document metadata listing, retrieval, and deletion with owner isolation
 - compensating cleanup across PostgreSQL and local file storage
+- one durable PostgreSQL processing job per document
+- Redis-compatible broker transport isolated between development and tests
+- Dramatiq producer and worker processes with bounded retries
+- explicit queued, processing, ready, and failed state transitions
+- idempotent file-size and SHA-256 integrity verification
+- observable dispatch state and owner-scoped processing status
 - distinct Pydantic request and response contracts
 - generated OpenAPI and Swagger UI documentation
 - PostgreSQL-backed pytest coverage
@@ -53,6 +59,8 @@ not been implemented.
 | `POST` | `/knowledge-bases/{id}/documents` | Upload a supported document | `201` |
 | `GET` | `/knowledge-bases/{id}/documents` | List document metadata | `200` |
 | `GET` | `/documents/{id}` | Retrieve document metadata | `200` |
+| `GET` | `/documents/{id}/ingestion-job` | Retrieve processing status | `200` |
+| `POST` | `/documents/{id}/ingestion-job/retry` | Redispatch a recoverable job | `202` |
 | `DELETE` | `/documents/{id}` | Delete metadata and stored bytes | `204` |
 
 Missing or invalid credentials return `401`. Requests for another user's knowledge base return
@@ -77,9 +85,20 @@ HTTP client
     -> Bearer token verification and current-user resolution
     -> owner-scoped KnowledgeBase lookup
     -> multipart UploadFile streamed through local storage
-    -> PostgreSQL Document metadata transaction
+    -> PostgreSQL Document and IngestionJob transaction
+    -> Redis dispatch attempt
     -> Pydantic response validation
     -> JSON response
+```
+
+```text
+FastAPI producer
+    -> Redis-compatible broker
+    -> Dramatiq worker process
+    -> worker-owned SQLAlchemy session
+    -> controlled file-storage lookup
+    -> streamed size and SHA-256 verification
+    -> PostgreSQL processing state
 ```
 
 ```text
@@ -91,6 +110,7 @@ app/
   schemas/   public request and response contracts
   services/  coordination across database and file-storage operations
   storage/   controlled local file storage implementation
+  workers/   Dramatiq broker configuration and worker actor entry point
   main.py    application construction and ASGI entrypoint
 alembic/     ordered database schema revisions
 tests/       API, persistence, validation, and OpenAPI tests
@@ -112,6 +132,20 @@ Authentication and authorization are separate steps. A valid Bearer token authen
 Owner-filtered database queries then authorize access to a knowledge base. PostgreSQL backs that
 policy with a non-null foreign key from each knowledge base to its owner.
 
+Redis is transport, not the source of truth. It carries a small message containing only the stable
+job UUID. PostgreSQL stores the document relationship, status, attempts, timestamps, and safe failure
+code. If Redis loses a queued message, the durable row still shows work that has not reached a final
+state and the authenticated retry endpoint can dispatch it again.
+
+The Phase 4 migration backfills Phase 3 documents with queued jobs but does not enqueue work from a
+schema migration. Those jobs have a null dispatch timestamp and can be sent through the authenticated
+retry endpoint. This keeps schema history deterministic and avoids hidden broker side effects during
+deployment.
+
+`ready` has deliberately narrow meaning: the stored source still exists and its byte count and
+SHA-256 checksum match the upload metadata. It does not mean the document has been parsed, chunked,
+embedded, indexed, or made searchable.
+
 ## Local setup
 
 Prerequisites:
@@ -119,6 +153,7 @@ Prerequisites:
 - Python 3.13
 - [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
 - a currently supported PostgreSQL installation with `psql` available
+- a local Redis-compatible service, such as Memurai Developer Edition on Windows
 
 Clone the repository and install the locked dependencies:
 
@@ -153,6 +188,26 @@ result into source files or commit it:
 uv run python -c "import secrets; print(secrets.token_urlsafe(48))"
 ```
 
+On Windows, install the stable Memurai Developer Edition as an automatically started service on
+loopback port `6379`. Developer Edition is for local development and testing only and requires a
+service restart after ten continuous days. Do not expose an unauthenticated local broker to the
+network. Redis under WSL2 is a viable alternative if its service lifecycle is managed explicitly.
+
+Use Redis logical database `0` for development and a separate nonzero database for tests:
+
+```dotenv
+RAG_REDIS_URL=redis://127.0.0.1:6379/0
+RAG_TEST_REDIS_URL=redis://127.0.0.1:6379/1
+```
+
+Verify the local broker before starting the application:
+
+```powershell
+& "C:\Program Files\Memurai\memurai-cli.exe" -p 6379 ping
+```
+
+The expected response is `PONG`.
+
 Apply the committed schema migrations:
 
 ```bash
@@ -163,6 +218,13 @@ Start the API with automatic source-code reloading during development:
 
 ```bash
 uv run uvicorn app.main:app --reload
+```
+
+Start the worker in a second terminal. One process keeps the Windows development behavior easy to
+observe; its threads can still consume more than one message:
+
+```bash
+uv run dramatiq app.workers.tasks --processes 1 --threads 4
 ```
 
 For a manual Swagger walkthrough, use the single-process command instead. Reloading is unnecessary
@@ -181,9 +243,8 @@ The upload directory is created on the first successful write. The default `data
 is ignored by Git. Do not place files there that need independent backup or durable production
 retention.
 
-Docker is deliberately not part of this phase. A native or otherwise externally managed PostgreSQL
-instance is enough to teach and validate the persistence boundary without selecting a container
-workflow prematurely.
+Docker is deliberately not part of this phase. PostgreSQL and the Redis-compatible broker are
+externally managed local services until a later deployment phase selects a container workflow.
 
 ## Configuration
 
@@ -202,12 +263,15 @@ configuration.
 | `RAG_ACCESS_TOKEN_EXPIRE_MINUTES` | Access-token lifetime | `15`; accepted range `1` to `60` |
 | `RAG_UPLOAD_DIR` | Local development file-storage root | `./data/uploads` |
 | `RAG_MAX_UPLOAD_BYTES` | Maximum bytes accepted while copying one file | `10485760` (10 MiB) |
+| `RAG_REDIS_URL` | Dramatiq Redis-compatible broker connection | Required; local development uses database `0` |
+| `RAG_TEST_REDIS_URL` | Isolated test broker connection | Required; must use a nonzero database distinct from development |
 
-The test harness refuses to run destructive cleanup unless the configured database name ends in
-`_test`. Tests generate an isolated in-process JWT secret, apply Alembic migrations once, and use a
-temporary upload directory outside the repository. Database rows and temporary files are reset
-between cases. SQLite is not used because it would hide PostgreSQL driver, transaction, UUID,
-foreign-key, and constraint behavior.
+The test harness refuses destructive cleanup unless the PostgreSQL database name ends in `_test`
+and the Redis test URL selects a nonzero logical database distinct from development. Tests generate
+an isolated JWT secret, apply Alembic migrations once, use a temporary upload directory outside the
+repository, and clear only the configured test Redis database. SQLite and an in-memory fake broker
+are not used for the integration path because they would hide the real persistence and queue
+behavior.
 
 ## Document storage scope
 
@@ -234,6 +298,38 @@ database deletion, then remove the staged bytes. A process or machine crash can 
 sequence and require an orphan-file audit. Production object storage would need the same explicit
 consistency policy, usually with durable cleanup jobs and lifecycle rules.
 
+## Background-processing scope
+
+FastAPI is the producer: after file storage succeeds, it commits `Document` and `IngestionJob` rows
+together, then sends only the job UUID through Redis. Dramatiq is the task framework: it serializes
+the message, consumes it in a separate process, acknowledges successful work, and applies bounded
+retry with exponential backoff when the actor raises a transient error. The worker opens and closes
+its own SQLAlchemy session because no HTTP request dependency exists in that process.
+
+The worker independently resolves the authoritative rows, opens the file through the storage
+boundary, streams it, recalculates size and SHA-256, and compares both values with PostgreSQL. A
+missing file or checksum mismatch is permanent and moves the job to `failed` without automatic
+retry. Temporary file access failures return the job to `queued` and can run at most four total
+attempts before a safe failure code is persisted. Database outages are retried by Dramatiq; if the
+broker eventually dead-letters the message, the PostgreSQL row remains available for diagnosis and
+controlled redispatch.
+
+Dramatiq provides at-least-once delivery, not exactly-once execution. PostgreSQL advisory locks stop
+simultaneous executions of the same job. A repeated delivery sees a final `ready` or `failed` state
+and exits without changing metadata. If a worker process dies after recording `processing`, its
+database connection releases the advisory lock, so redelivery or the guarded retry endpoint can
+resume the durable job.
+
+PostgreSQL and Redis do not share one transaction. If the database commit succeeds but enqueueing
+fails, the upload still returns the created document, `X-Processing-Dispatch` is `pending`, and
+`dispatched_at` remains null. The job-status URL is returned in `Location`; calling the retry route
+is idempotent because duplicate delivery is safe. At higher throughput, a transactional outbox and
+a dispatcher process would replace this manual recovery boundary.
+
+The API is eventually consistent: immediately after upload the document exists while its job can be
+`queued` or `processing`; later it becomes `ready` or `failed`. This keeps file verification outside
+request latency and lets API and worker capacity scale independently.
+
 ## Authentication scope
 
 Passwords are never stored or returned. Argon2id produces a salted, deliberately expensive
@@ -248,24 +344,29 @@ recovery, email verification, and stronger operational secret management also re
 
 ## Manual Swagger workflow
 
-1. Apply migrations with `uv run alembic upgrade head`, start the API with
-   `uv run uvicorn app.main:app`, and open <http://127.0.0.1:8000/>.
-2. Run `POST /auth/register`. The supplied example meets the email and 12-character minimum-password
+1. Confirm the Redis-compatible service responds to `PING`, then apply migrations with
+   `uv run alembic upgrade head`.
+2. In Terminal A, start the API with `uv run uvicorn app.main:app`.
+3. In Terminal B, start the worker with
+   `uv run dramatiq app.workers.tasks --processes 1 --threads 4`.
+4. Open <http://127.0.0.1:8000/>.
+5. Run `POST /auth/register`. The supplied example meets the email and 12-character minimum-password
    validation. Use a different fictional email when repeating the walkthrough because emails are
    unique.
-3. Run `POST /auth/login` with the same email and password. Copy only the returned `access_token`.
-4. Select **Authorize**, paste the token value without adding `Bearer`, and confirm. Swagger supplies
+6. Run `POST /auth/login` with the same email and password. Copy only the returned `access_token`.
+7. Select **Authorize**, paste the token value without adding `Bearer`, and confirm. Swagger supplies
    the `Authorization: Bearer <token>` header.
-5. Run `POST /knowledge-bases` and copy the `id` from its `201` response.
-6. Run `POST /knowledge-bases/{knowledge_base_id}/documents`, replace Swagger's placeholder UUID with
+8. Run `POST /knowledge-bases` and copy the `id` from its `201` response.
+9. Run `POST /knowledge-bases/{knowledge_base_id}/documents`, replace Swagger's placeholder UUID with
    that copied knowledge-base ID, and choose a small `.txt`, `.md`, or valid `.pdf` file. A `.txt`
    file is the least platform-dependent manual sample.
-7. Copy the returned document `id`. List metadata through
-   `GET /knowledge-bases/{knowledge_base_id}/documents`, then retrieve it through
-   `GET /documents/{document_id}`.
-8. Delete it through `DELETE /documents/{document_id}` and verify that the subsequent metadata lookup
-   returns `404`.
-9. Stop Uvicorn by pressing `Ctrl+C` once and allow the shutdown messages to complete.
+10. Copy the returned document `id`. Call `GET /documents/{document_id}/ingestion-job` until it
+    reports `ready`. This only confirms source integrity preparation.
+11. List metadata through `GET /knowledge-bases/{knowledge_base_id}/documents`, then retrieve it
+    through `GET /documents/{document_id}`.
+12. Delete it through `DELETE /documents/{document_id}` and verify that the subsequent metadata and
+    job lookups return `404`.
+13. Stop the worker and API with one `Ctrl+C` in each terminal and allow shutdown to finish.
 
 A `422` from registration means the submitted body failed its displayed schema, commonly because the
 email is invalid or the password is shorter than 12 characters. A `404` from a resource route means
@@ -282,6 +383,7 @@ format example and is never created automatically.
 | `uv run alembic current` | Show the database's applied revision |
 | `uv run uvicorn app.main:app --reload` | Start the development API |
 | `uv run uvicorn app.main:app` | Start a single-process manual Swagger session |
+| `uv run dramatiq app.workers.tasks --processes 1 --threads 4` | Start the Windows-friendly document worker |
 | `uv run pytest` | Run the PostgreSQL-backed test suite |
 | `uv run ruff check .` | Run lint checks |
 | `uv run ruff format --check .` | Verify formatting |
@@ -293,13 +395,14 @@ To override the test connection for one PowerShell session:
 
 ```powershell
 $env:RAG_TEST_DATABASE_URL = "postgresql+psycopg://rag_app:change-me@localhost:5432/rag_platform_test"
+$env:RAG_TEST_REDIS_URL = "redis://127.0.0.1:6379/1"
 uv run pytest
 ```
 
 ## Planned, not implemented
 
-- document parsing, text extraction, normalization, deduplication, and chunking
-- Redis, background workers, and asynchronous ingestion jobs
+- text extraction and format-specific parsing inside the worker pipeline
+- document normalization, deduplication, and chunking
 - BM25 lexical retrieval
 - embeddings, Pinecone, semantic search, hybrid retrieval, and reranking
 - LangChain, LLM providers, grounded generation, and source citations
@@ -318,6 +421,7 @@ uv run pytest
 - [ADR-006: Use Argon2id password hashes and short-lived JWT access tokens](docs/decisions/0006-use-argon2id-and-short-lived-jwts.md)
 - [ADR-007: Enforce knowledge base ownership and conceal cross-user resources](docs/decisions/0007-enforce-knowledge-base-ownership.md)
 - [ADR-008: Store document metadata and file bytes separately](docs/decisions/0008-separate-document-metadata-and-file-storage.md)
+- [ADR-009: Use Redis and Dramatiq for document processing](docs/decisions/0009-use-redis-and-dramatiq-for-document-processing.md)
 
 The repository uses production-oriented boundaries, but it does not yet claim production readiness.
 Token revocation and rotation, account lifecycle controls, backup and recovery procedures, rate

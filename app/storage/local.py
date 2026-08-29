@@ -94,6 +94,21 @@ class LocalFileStorage:
         except OSError as error:
             raise StorageUnavailable from error
 
+    def inspect(self, storage_key: str) -> StoredFile:
+        path = self._path_for(storage_key)
+        size_bytes = 0
+        checksum = hashlib.sha256()
+        try:
+            with path.open("rb") as source:
+                while chunk := source.read(CHUNK_SIZE):
+                    size_bytes += len(chunk)
+                    checksum.update(chunk)
+        except FileNotFoundError as error:
+            raise StoredFileMissing from error
+        except OSError as error:
+            raise StorageUnavailable from error
+        return StoredFile(size_bytes=size_bytes, checksum_sha256=checksum.hexdigest())
+
     def stage_delete(self, storage_key: str) -> StagedDeletion:
         original_path = self._path_for(storage_key)
         staged_path = self._path_for(f".trash/{uuid.uuid4()}")

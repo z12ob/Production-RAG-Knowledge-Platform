@@ -3,7 +3,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, PostgresDsn, SecretStr
+from pydantic import Field, PostgresDsn, RedisDsn, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     access_token_expire_minutes: Annotated[int, Field(ge=1, le=60)] = 15
     upload_dir: Path = Path("data/uploads")
     max_upload_bytes: Annotated[int, Field(ge=1, le=100 * 1024 * 1024)] = 10 * 1024 * 1024
+    redis_url: RedisDsn
 
 
 @lru_cache

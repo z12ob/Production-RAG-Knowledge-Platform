@@ -22,11 +22,17 @@ from app.api.knowledge_bases import find_knowledge_base
 from app.core.config import get_settings
 from app.db.session import DatabaseSession
 from app.models.document import Document
+from app.models.ingestion_job import IngestionJob, IngestionJobStatus
 from app.models.knowledge_base import KnowledgeBase
-from app.schemas.document import DocumentResponse
+from app.schemas.document import DocumentResponse, IngestionJobResponse
 from app.services.document_lifecycle import (
     commit_uploaded_document,
     delete_entity_with_files,
+)
+from app.services.ingestion_jobs import (
+    JobAlreadyProcessing,
+    dispatch_ingestion_job,
+    reset_job_for_retry,
 )
 from app.storage.dependencies import FileStorage
 from app.storage.local import (
@@ -144,6 +150,29 @@ def find_document(
     return document
 
 
+def find_ingestion_job(
+    document_id: uuid.UUID,
+    owner_id: uuid.UUID,
+    session: Session,
+) -> IngestionJob:
+    statement = (
+        select(IngestionJob)
+        .join(Document)
+        .join(KnowledgeBase)
+        .where(
+            IngestionJob.document_id == document_id,
+            KnowledgeBase.owner_id == owner_id,
+        )
+    )
+    job = session.scalar(statement)
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document processing job not found.",
+        )
+    return job
+
+
 def storage_unavailable(error: StorageError) -> HTTPException:
     logger.warning("File storage operation failed: %s", type(error).__name__)
     return HTTPException(
@@ -157,6 +186,24 @@ def storage_unavailable(error: StorageError) -> HTTPException:
     response_model=DocumentResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Upload a document",
+    description=(
+        "Stores the file and metadata, creates a durable processing job, and attempts asynchronous "
+        "dispatch. The response does not wait for background processing."
+    ),
+    responses={
+        status.HTTP_201_CREATED: {
+            "headers": {
+                "Location": {
+                    "description": "URL of the document processing job.",
+                    "schema": {"type": "string"},
+                },
+                "X-Processing-Dispatch": {
+                    "description": "Whether broker dispatch was confirmed or remains pending.",
+                    "schema": {"type": "string", "enum": ["enqueued", "pending"]},
+                },
+            }
+        }
+    },
 )
 def upload_document(
     knowledge_base_id: KnowledgeBasePathId,
@@ -164,6 +211,7 @@ def upload_document(
     session: DatabaseSession,
     current_user: CurrentUser,
     storage: FileStorage,
+    response: Response,
 ) -> Document:
     find_knowledge_base(knowledge_base_id, current_user.id, session)
     original_filename, content_type = validate_upload_metadata(file)
@@ -207,8 +255,13 @@ def upload_document(
         checksum_sha256=stored_file.checksum_sha256,
         storage_key=storage_key,
     )
-    commit_uploaded_document(session, storage, document)
+    ingestion_job = IngestionJob(document_id=document_id)
+    commit_uploaded_document(session, storage, document, ingestion_job)
     session.refresh(document)
+    session.refresh(ingestion_job)
+    dispatched = dispatch_ingestion_job(session, ingestion_job)
+    response.headers["Location"] = f"/documents/{document_id}/ingestion-job"
+    response.headers["X-Processing-Dispatch"] = "enqueued" if dispatched else "pending"
     return document
 
 
@@ -246,6 +299,73 @@ def get_document(
     current_user: CurrentUser,
 ) -> Document:
     return find_document(document_id, current_user.id, session)
+
+
+@router.get(
+    "/documents/{document_id}/ingestion-job",
+    response_model=IngestionJobResponse,
+    summary="Get document processing status",
+    description=(
+        "READY means source-file integrity checks passed. It does not mean the document has been "
+        "parsed, chunked, indexed, or made searchable."
+    ),
+)
+def get_ingestion_job(
+    document_id: DocumentPathId,
+    session: DatabaseSession,
+    current_user: CurrentUser,
+) -> IngestionJob:
+    return find_ingestion_job(document_id, current_user.id, session)
+
+
+@router.post(
+    "/documents/{document_id}/ingestion-job/retry",
+    response_model=IngestionJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Retry document processing",
+    responses={
+        status.HTTP_202_ACCEPTED: {
+            "headers": {
+                "Location": {
+                    "description": "URL of the document processing job.",
+                    "schema": {"type": "string"},
+                },
+                "X-Processing-Dispatch": {
+                    "description": "Whether broker dispatch was confirmed or remains pending.",
+                    "schema": {"type": "string", "enum": ["enqueued", "pending"]},
+                },
+            }
+        }
+    },
+)
+def retry_ingestion_job(
+    document_id: DocumentPathId,
+    session: DatabaseSession,
+    current_user: CurrentUser,
+    response: Response,
+) -> IngestionJob:
+    job = find_ingestion_job(document_id, current_user.id, session)
+    if job.status == IngestionJobStatus.READY.value:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The document is already ready for the extraction pipeline.",
+        )
+    if job.status in {
+        IngestionJobStatus.FAILED.value,
+        IngestionJobStatus.PROCESSING.value,
+    }:
+        try:
+            reset_job_for_retry(session, job)
+        except JobAlreadyProcessing as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="The document is already being processed.",
+            ) from error
+
+    dispatched = dispatch_ingestion_job(session, job)
+    response.headers["Location"] = f"/documents/{document_id}/ingestion-job"
+    response.headers["X-Processing-Dispatch"] = "enqueued" if dispatched else "pending"
+    return job
 
 
 @router.delete(
