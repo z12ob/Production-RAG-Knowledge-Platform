@@ -1,4 +1,5 @@
 import os
+import secrets
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -30,6 +31,8 @@ if database_name is None or not database_name.endswith("_test"):
 
 os.environ["RAG_DATABASE_URL"] = TEST_DATABASE_URL
 os.environ["RAG_ENVIRONMENT"] = "test"
+os.environ["RAG_JWT_SECRET"] = secrets.token_urlsafe(48)
+os.environ["RAG_ACCESS_TOKEN_EXPIRE_MINUTES"] = "15"
 
 test_engine = create_engine(TEST_DATABASE_URL)
 
@@ -45,4 +48,4 @@ def migrated_database() -> Iterator[None]:
 @pytest.fixture(autouse=True)
 def clean_database(migrated_database: None) -> None:
     with test_engine.begin() as connection:
-        connection.execute(text("TRUNCATE TABLE knowledge_bases CASCADE"))
+        connection.execute(text("TRUNCATE TABLE knowledge_bases, users CASCADE"))

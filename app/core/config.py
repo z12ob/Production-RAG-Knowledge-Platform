@@ -2,7 +2,7 @@ from enum import StrEnum
 from functools import lru_cache
 from typing import Annotated, Literal
 
-from pydantic import Field, PostgresDsn
+from pydantic import Field, PostgresDsn, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     database_url: PostgresDsn
     database_connect_timeout_seconds: Annotated[int, Field(ge=1, le=30)] = 5
+    jwt_secret: Annotated[SecretStr, Field(min_length=32)]
+    access_token_expire_minutes: Annotated[int, Field(ge=1, le=60)] = 15
 
 
 @lru_cache

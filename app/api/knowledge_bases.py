@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException, Query, Response, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.api.dependencies import CurrentUser
 from app.db.session import DatabaseSession
 from app.models.knowledge_base import KnowledgeBase
 from app.schemas.knowledge_base import (
@@ -18,9 +19,14 @@ router = APIRouter(prefix="/knowledge-bases", tags=["knowledge-bases"])
 
 def find_knowledge_base(
     knowledge_base_id: uuid.UUID,
+    owner_id: uuid.UUID,
     session: Session,
 ) -> KnowledgeBase:
-    knowledge_base = session.get(KnowledgeBase, knowledge_base_id)
+    statement = select(KnowledgeBase).where(
+        KnowledgeBase.id == knowledge_base_id,
+        KnowledgeBase.owner_id == owner_id,
+    )
+    knowledge_base = session.scalar(statement)
     if knowledge_base is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -38,8 +44,9 @@ def find_knowledge_base(
 def create_knowledge_base(
     payload: KnowledgeBaseCreate,
     session: DatabaseSession,
+    current_user: CurrentUser,
 ) -> KnowledgeBase:
-    knowledge_base = KnowledgeBase(**payload.model_dump())
+    knowledge_base = KnowledgeBase(owner_id=current_user.id, **payload.model_dump())
     session.add(knowledge_base)
     session.commit()
     session.refresh(knowledge_base)
@@ -53,11 +60,13 @@ def create_knowledge_base(
 )
 def list_knowledge_bases(
     session: DatabaseSession,
+    current_user: CurrentUser,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> list[KnowledgeBase]:
     statement = (
         select(KnowledgeBase)
+        .where(KnowledgeBase.owner_id == current_user.id)
         .order_by(KnowledgeBase.created_at, KnowledgeBase.id)
         .limit(limit)
         .offset(offset)
@@ -74,8 +83,9 @@ def list_knowledge_bases(
 def get_knowledge_base(
     knowledge_base_id: uuid.UUID,
     session: DatabaseSession,
+    current_user: CurrentUser,
 ) -> KnowledgeBase:
-    return find_knowledge_base(knowledge_base_id, session)
+    return find_knowledge_base(knowledge_base_id, current_user.id, session)
 
 
 @router.patch(
@@ -87,8 +97,9 @@ def update_knowledge_base(
     knowledge_base_id: uuid.UUID,
     payload: KnowledgeBaseUpdate,
     session: DatabaseSession,
+    current_user: CurrentUser,
 ) -> KnowledgeBase:
-    knowledge_base = find_knowledge_base(knowledge_base_id, session)
+    knowledge_base = find_knowledge_base(knowledge_base_id, current_user.id, session)
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(knowledge_base, field, value)
 
@@ -105,8 +116,9 @@ def update_knowledge_base(
 def delete_knowledge_base(
     knowledge_base_id: uuid.UUID,
     session: DatabaseSession,
+    current_user: CurrentUser,
 ) -> Response:
-    knowledge_base = find_knowledge_base(knowledge_base_id, session)
+    knowledge_base = find_knowledge_base(knowledge_base_id, current_user.id, session)
     session.delete(knowledge_base)
     session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)

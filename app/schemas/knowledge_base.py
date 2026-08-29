@@ -35,6 +35,7 @@ class KnowledgeBaseResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", from_attributes=True)
 
     id: uuid.UUID
+    owner_id: uuid.UUID
     name: str
     description: str | None
     created_at: datetime
