@@ -4,7 +4,16 @@ import uuid
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, File, HTTPException, Query, Response, UploadFile, status
+from fastapi import (
+    APIRouter,
+    File,
+    HTTPException,
+    Query,
+    Response,
+    UploadFile,
+    status,
+)
+from fastapi import Path as PathParameter
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -31,6 +40,24 @@ from app.storage.local import (
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["documents"])
 settings = get_settings()
+
+KnowledgeBasePathId = Annotated[
+    uuid.UUID,
+    PathParameter(
+        description=(
+            "Copy the id returned by POST /knowledge-bases. Swagger's placeholder UUID is not "
+            "an existing knowledge base."
+        )
+    ),
+]
+DocumentPathId = Annotated[
+    uuid.UUID,
+    PathParameter(
+        description=(
+            "Copy the id returned by a successful document upload or document metadata listing."
+        )
+    ),
+]
 
 SUPPORTED_FILE_TYPES: dict[str, tuple[frozenset[str], str]] = {
     ".pdf": (frozenset({"application/pdf"}), "application/pdf"),
@@ -132,7 +159,7 @@ def storage_unavailable(error: StorageError) -> HTTPException:
     summary="Upload a document",
 )
 def upload_document(
-    knowledge_base_id: uuid.UUID,
+    knowledge_base_id: KnowledgeBasePathId,
     file: Annotated[UploadFile, File(description="A PDF, Markdown, or plain-text file")],
     session: DatabaseSession,
     current_user: CurrentUser,
@@ -191,7 +218,7 @@ def upload_document(
     summary="List documents in a knowledge base",
 )
 def list_documents(
-    knowledge_base_id: uuid.UUID,
+    knowledge_base_id: KnowledgeBasePathId,
     session: DatabaseSession,
     current_user: CurrentUser,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
@@ -214,7 +241,7 @@ def list_documents(
     summary="Get document metadata",
 )
 def get_document(
-    document_id: uuid.UUID,
+    document_id: DocumentPathId,
     session: DatabaseSession,
     current_user: CurrentUser,
 ) -> Document:
@@ -227,7 +254,7 @@ def get_document(
     summary="Delete a document",
 )
 def delete_document(
-    document_id: uuid.UUID,
+    document_id: DocumentPathId,
     session: DatabaseSession,
     current_user: CurrentUser,
     storage: FileStorage,

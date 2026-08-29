@@ -236,3 +236,16 @@ def test_openapi_exposes_bearer_auth_without_password_hashes() -> None:
     assert document["paths"]["/knowledge-bases"]["post"]["security"] == [{"BearerAuth": []}]
     assert "security" not in document["paths"]["/auth/register"]["post"]
     assert "password_hash" not in str(document["components"]["schemas"])
+
+
+def test_openapi_auth_examples_pass_registration_and_login_validation() -> None:
+    with TestClient(app) as client:
+        document = client.get("/openapi.json").json()
+        registration_example = document["components"]["schemas"]["UserRegister"]["examples"][0]
+        login_example = document["components"]["schemas"]["UserLogin"]["examples"][0]
+
+        registration_response = client.post("/auth/register", json=registration_example)
+        login_response = client.post("/auth/login", json=login_example)
+
+    assert registration_response.status_code == 201
+    assert login_response.status_code == 200

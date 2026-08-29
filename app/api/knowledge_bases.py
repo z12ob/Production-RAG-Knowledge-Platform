@@ -1,7 +1,7 @@
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Query, Response, status
+from fastapi import APIRouter, HTTPException, Path, Query, Response, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -19,6 +19,16 @@ from app.storage.dependencies import FileStorage
 from app.storage.local import StorageError
 
 router = APIRouter(prefix="/knowledge-bases", tags=["knowledge-bases"])
+
+KnowledgeBasePathId = Annotated[
+    uuid.UUID,
+    Path(
+        description=(
+            "Copy the id returned by POST /knowledge-bases or GET /knowledge-bases. Swagger's "
+            "placeholder UUID is not an existing knowledge base."
+        )
+    ),
+]
 
 
 def find_knowledge_base(
@@ -85,7 +95,7 @@ def list_knowledge_bases(
     summary="Get a knowledge base",
 )
 def get_knowledge_base(
-    knowledge_base_id: uuid.UUID,
+    knowledge_base_id: KnowledgeBasePathId,
     session: DatabaseSession,
     current_user: CurrentUser,
 ) -> KnowledgeBase:
@@ -98,7 +108,7 @@ def get_knowledge_base(
     summary="Update a knowledge base",
 )
 def update_knowledge_base(
-    knowledge_base_id: uuid.UUID,
+    knowledge_base_id: KnowledgeBasePathId,
     payload: KnowledgeBaseUpdate,
     session: DatabaseSession,
     current_user: CurrentUser,
@@ -118,7 +128,7 @@ def update_knowledge_base(
     summary="Delete a knowledge base",
 )
 def delete_knowledge_base(
-    knowledge_base_id: uuid.UUID,
+    knowledge_base_id: KnowledgeBasePathId,
     session: DatabaseSession,
     current_user: CurrentUser,
     storage: FileStorage,

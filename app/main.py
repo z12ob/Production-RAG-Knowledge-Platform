@@ -3,6 +3,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.responses import RedirectResponse
 
 from app.api.auth import router as auth_router
 from app.api.documents import router as documents_router
@@ -27,12 +28,22 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         logger.info("Application stopped")
 
 
+def redirect_to_docs() -> RedirectResponse:
+    return RedirectResponse(url="/docs")
+
+
 def create_app() -> FastAPI:
     application = FastAPI(
         title=settings.app_name,
         summary="API foundation for a production-style knowledge platform.",
         version=settings.app_version,
         lifespan=lifespan,
+    )
+    application.add_api_route(
+        "/",
+        redirect_to_docs,
+        methods=["GET"],
+        include_in_schema=False,
     )
     application.include_router(health_router)
     application.include_router(auth_router)

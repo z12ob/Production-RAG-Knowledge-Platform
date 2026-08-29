@@ -159,13 +159,22 @@ Apply the committed schema migrations:
 uv run alembic upgrade head
 ```
 
-Start the API:
+Start the API with automatic source-code reloading during development:
 
 ```bash
 uv run uvicorn app.main:app --reload
 ```
 
-Then open <http://127.0.0.1:8000/docs> or call
+For a manual Swagger walkthrough, use the single-process command instead. Reloading is unnecessary
+when no source files are being edited and can produce noisy Windows terminal signal output during
+shutdown:
+
+```bash
+uv run uvicorn app.main:app
+```
+
+Then open <http://127.0.0.1:8000/>; the root redirects to the interactive documentation at
+<http://127.0.0.1:8000/docs>. Process health remains available at
 <http://127.0.0.1:8000/health>.
 
 The upload directory is created on the first successful write. The default `data/uploads/` location
@@ -237,6 +246,32 @@ multi-device session management, or signing-key rotation. That is an intentional
 learning phase, not a claim of complete production identity infrastructure. Rate limiting, account
 recovery, email verification, and stronger operational secret management also remain future work.
 
+## Manual Swagger workflow
+
+1. Apply migrations with `uv run alembic upgrade head`, start the API with
+   `uv run uvicorn app.main:app`, and open <http://127.0.0.1:8000/>.
+2. Run `POST /auth/register`. The supplied example meets the email and 12-character minimum-password
+   validation. Use a different fictional email when repeating the walkthrough because emails are
+   unique.
+3. Run `POST /auth/login` with the same email and password. Copy only the returned `access_token`.
+4. Select **Authorize**, paste the token value without adding `Bearer`, and confirm. Swagger supplies
+   the `Authorization: Bearer <token>` header.
+5. Run `POST /knowledge-bases` and copy the `id` from its `201` response.
+6. Run `POST /knowledge-bases/{knowledge_base_id}/documents`, replace Swagger's placeholder UUID with
+   that copied knowledge-base ID, and choose a small `.txt`, `.md`, or valid `.pdf` file. A `.txt`
+   file is the least platform-dependent manual sample.
+7. Copy the returned document `id`. List metadata through
+   `GET /knowledge-bases/{knowledge_base_id}/documents`, then retrieve it through
+   `GET /documents/{document_id}`.
+8. Delete it through `DELETE /documents/{document_id}` and verify that the subsequent metadata lookup
+   returns `404`.
+9. Stop Uvicorn by pressing `Ctrl+C` once and allow the shutdown messages to complete.
+
+A `422` from registration means the submitted body failed its displayed schema, commonly because the
+email is invalid or the password is shorter than 12 characters. A `404` from a resource route means
+the UUID is unknown to the authenticated user; the placeholder UUID displayed by Swagger is only a
+format example and is never created automatically.
+
 ## Development commands
 
 | Command | Purpose |
@@ -246,6 +281,7 @@ recovery, email verification, and stronger operational secret management also re
 | `uv run alembic downgrade -1` | Revert one revision when that downgrade is safe |
 | `uv run alembic current` | Show the database's applied revision |
 | `uv run uvicorn app.main:app --reload` | Start the development API |
+| `uv run uvicorn app.main:app` | Start a single-process manual Swagger session |
 | `uv run pytest` | Run the PostgreSQL-backed test suite |
 | `uv run ruff check .` | Run lint checks |
 | `uv run ruff format --check .` | Verify formatting |

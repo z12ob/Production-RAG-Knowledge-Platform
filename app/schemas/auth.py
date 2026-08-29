@@ -2,21 +2,31 @@ import uuid
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, JsonValue, SecretStr
 
 RegistrationPassword = Annotated[SecretStr, Field(min_length=12, max_length=128)]
 LoginPassword = Annotated[SecretStr, Field(min_length=1, max_length=128)]
+AUTH_EXAMPLE: dict[str, JsonValue] = {
+    "email": "swagger.user@example.com",
+    "password": "a-long-local-demo-password",
+}
 
 
 class UserRegister(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={"examples": [AUTH_EXAMPLE]},
+    )
 
     email: EmailStr
     password: RegistrationPassword
 
 
 class UserLogin(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={"examples": [AUTH_EXAMPLE]},
+    )
 
     email: EmailStr
     password: LoginPassword

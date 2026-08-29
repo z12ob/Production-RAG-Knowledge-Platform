@@ -348,5 +348,12 @@ def test_openapi_declares_multipart_upload_without_internal_storage_fields() -> 
     upload_operation = document["paths"]["/knowledge-bases/{knowledge_base_id}/documents"]["post"]
     assert "multipart/form-data" in upload_operation["requestBody"]["content"]
     assert upload_operation["security"] == [{"BearerAuth": []}]
+    knowledge_base_parameter = next(
+        parameter
+        for parameter in upload_operation["parameters"]
+        if parameter["name"] == "knowledge_base_id"
+    )
+    assert "POST /knowledge-bases" in knowledge_base_parameter["description"]
+    assert "placeholder" in knowledge_base_parameter["description"].lower()
     assert "DocumentResponse" in document["components"]["schemas"]
     assert "storage_key" not in str(document["components"]["schemas"])
