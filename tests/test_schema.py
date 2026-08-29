@@ -34,3 +34,30 @@ def test_user_and_ownership_constraints_exist_in_postgresql() -> None:
 
     indexes = inspector.get_indexes("knowledge_bases")
     assert any(index["column_names"] == ["owner_id"] for index in indexes)
+
+
+def test_document_constraints_and_listing_index_exist_in_postgresql() -> None:
+    inspector = inspect(engine)
+    assert "documents" in inspector.get_table_names()
+
+    columns = {column["name"]: column for column in inspector.get_columns("documents")}
+    assert columns["knowledge_base_id"]["nullable"] is False
+    assert columns["original_filename"]["nullable"] is False
+    assert columns["content_type"]["nullable"] is False
+    assert columns["size_bytes"]["nullable"] is False
+    assert columns["checksum_sha256"]["nullable"] is False
+    assert columns["storage_key"]["nullable"] is False
+
+    foreign_key = next(
+        item
+        for item in inspector.get_foreign_keys("documents")
+        if item["constrained_columns"] == ["knowledge_base_id"]
+    )
+    assert foreign_key["referred_table"] == "knowledge_bases"
+    assert foreign_key["referred_columns"] == ["id"]
+    assert foreign_key["options"]["ondelete"] == "CASCADE"
+
+    unique_constraints = inspector.get_unique_constraints("documents")
+    assert any(item["column_names"] == ["storage_key"] for item in unique_constraints)
+    indexes = inspector.get_indexes("documents")
+    assert any(item["column_names"] == ["knowledge_base_id"] for item in indexes)

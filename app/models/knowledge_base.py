@@ -8,6 +8,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
 
 if TYPE_CHECKING:
+    from app.models.document import Document
     from app.models.user import User
 
 
@@ -42,3 +43,8 @@ class KnowledgeBase(Base):
         onupdate=func.now(),
     )
     owner: Mapped["User"] = relationship(back_populates="knowledge_bases")
+    documents: Mapped[list["Document"]] = relationship(
+        back_populates="knowledge_base",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )

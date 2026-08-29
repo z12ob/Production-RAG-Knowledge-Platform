@@ -7,12 +7,16 @@ from sqlalchemy.orm import Session
 
 from app.api.dependencies import CurrentUser
 from app.db.session import DatabaseSession
+from app.models.document import Document
 from app.models.knowledge_base import KnowledgeBase
 from app.schemas.knowledge_base import (
     KnowledgeBaseCreate,
     KnowledgeBaseResponse,
     KnowledgeBaseUpdate,
 )
+from app.services.document_lifecycle import delete_entity_with_files
+from app.storage.dependencies import FileStorage
+from app.storage.local import StorageError
 
 router = APIRouter(prefix="/knowledge-bases", tags=["knowledge-bases"])
 
@@ -117,8 +121,19 @@ def delete_knowledge_base(
     knowledge_base_id: uuid.UUID,
     session: DatabaseSession,
     current_user: CurrentUser,
+    storage: FileStorage,
 ) -> Response:
     knowledge_base = find_knowledge_base(knowledge_base_id, current_user.id, session)
-    session.delete(knowledge_base)
-    session.commit()
+    storage_keys = list(
+        session.scalars(
+            select(Document.storage_key).where(Document.knowledge_base_id == knowledge_base.id)
+        )
+    )
+    try:
+        delete_entity_with_files(session, storage, knowledge_base, storage_keys)
+    except StorageError as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="File storage is temporarily unavailable.",
+        ) from error
     return Response(status_code=status.HTTP_204_NO_CONTENT)

@@ -1,5 +1,6 @@
 from enum import StrEnum
 from functools import lru_cache
+from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import Field, PostgresDsn, SecretStr
@@ -28,6 +29,8 @@ class Settings(BaseSettings):
     database_connect_timeout_seconds: Annotated[int, Field(ge=1, le=30)] = 5
     jwt_secret: Annotated[SecretStr, Field(min_length=32)]
     access_token_expire_minutes: Annotated[int, Field(ge=1, le=60)] = 15
+    upload_dir: Path = Path("data/uploads")
+    max_upload_bytes: Annotated[int, Field(ge=1, le=100 * 1024 * 1024)] = 10 * 1024 * 1024
 
 
 @lru_cache
