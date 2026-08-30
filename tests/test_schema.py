@@ -93,3 +93,32 @@ def test_ingestion_job_constraints_and_document_relationship_exist_in_postgresql
         "failure_code_matches_status",
         "status_valid",
     } <= constraint_names
+
+
+def test_canonical_extraction_and_chunk_constraints_exist_in_postgresql() -> None:
+    inspector = inspect(engine)
+    assert {"document_extractions", "document_chunks"} <= set(inspector.get_table_names())
+
+    extraction_columns = {
+        column["name"]: column for column in inspector.get_columns("document_extractions")
+    }
+    assert extraction_columns["document_id"]["nullable"] is False
+    assert extraction_columns["normalized_text"]["nullable"] is False
+    extraction_foreign_key = inspector.get_foreign_keys("document_extractions")[0]
+    assert extraction_foreign_key["referred_table"] == "documents"
+    assert extraction_foreign_key["options"]["ondelete"] == "CASCADE"
+
+    chunk_columns = {column["name"]: column for column in inspector.get_columns("document_chunks")}
+    assert chunk_columns["document_id"]["nullable"] is False
+    assert chunk_columns["ordinal"]["nullable"] is False
+    assert chunk_columns["text"]["nullable"] is False
+    chunk_foreign_key = inspector.get_foreign_keys("document_chunks")[0]
+    assert chunk_foreign_key["referred_table"] == "documents"
+    assert chunk_foreign_key["options"]["ondelete"] == "CASCADE"
+    unique_constraints = inspector.get_unique_constraints("document_chunks")
+    assert any(
+        constraint["column_names"] == ["document_id", "ordinal"]
+        for constraint in unique_constraints
+    )
+    indexes = inspector.get_indexes("document_chunks")
+    assert any(index["column_names"] == ["document_id"] for index in indexes)

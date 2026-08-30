@@ -4,12 +4,12 @@ A knowledge platform being built in small, reviewable layers. The finished appli
 to support authenticated knowledge bases, asynchronous document processing, hybrid retrieval, and
 grounded answers with source references.
 
-> Current phase: Background Processing
+> Current phase: Extraction and Chunking
 
 This is not yet a RAG system or a production deployment. The current repository demonstrates a
 typed HTTP API, authenticated per-user ownership, controlled document storage, and Redis-backed
-background integrity checks with PostgreSQL job state. Future capabilities are listed separately so
-the codebase never claims work that has not been implemented.
+background extraction with canonical PostgreSQL text and chunks. Future capabilities are listed
+separately so the codebase never claims work that has not been implemented.
 
 ## Implemented now
 
@@ -35,12 +35,18 @@ the codebase never claims work that has not been implemented.
 - one durable PostgreSQL processing job per document
 - Redis-compatible broker transport isolated between development and tests
 - Dramatiq producer and worker processes with bounded retries
-- explicit queued, processing, ready, and failed state transitions
+- explicit queued, verifying, extracting, chunking, ready-for-indexing, and failed states
 - idempotent file-size and SHA-256 integrity verification
+- page-aware PDF text extraction with `pypdf`
+- structure-aware Markdown parsing with `markdown-it-py` and UTF-8 plain-text extraction
+- conservative Unicode, line-ending, null-byte, and blank-line normalization
+- canonical normalized extraction stored in PostgreSQL
+- deterministic character-bounded chunks with controlled overlap and ordered provenance
+- atomic replacement of the complete extraction and chunk set during reprocessing
 - observable dispatch state and owner-scoped processing status
 - distinct Pydantic request and response contracts
 - generated OpenAPI and Swagger UI documentation
-- PostgreSQL-backed pytest coverage
+- 84 deterministic PostgreSQL, Redis, filesystem, parser, and API tests
 - Ruff linting and formatting, strict mypy checks, and a locked `uv` environment
 
 ## API
@@ -98,7 +104,9 @@ FastAPI producer
     -> worker-owned SQLAlchemy session
     -> controlled file-storage lookup
     -> streamed size and SHA-256 verification
-    -> PostgreSQL processing state
+    -> format-specific extraction and conservative normalization
+    -> deterministic structure-aware chunking
+    -> PostgreSQL canonical extraction, chunks, and processing state
 ```
 
 ```text
@@ -142,9 +150,14 @@ schema migration. Those jobs have a null dispatch timestamp and can be sent thro
 retry endpoint. This keeps schema history deterministic and avoids hidden broker side effects during
 deployment.
 
-`ready` has deliberately narrow meaning: the stored source still exists and its byte count and
-SHA-256 checksum match the upload metadata. It does not mean the document has been parsed, chunked,
-embedded, indexed, or made searchable.
+The Phase 5 migration does not silently reinterpret Phase 4 success. Old `ready` jobs only passed
+integrity checks, so the migration resets them to `queued` for extraction and clears their old
+attempt timestamps. Interrupted `processing` jobs are handled the same way. Existing `queued` jobs
+stay queued, while permanent `failed` jobs remain failed until the owner deliberately retries them.
+
+`ready_for_indexing` has deliberately narrow meaning: source integrity passed, text extraction and
+normalization succeeded, and one complete canonical chunk set was committed. It does not mean the
+document has a BM25 index, embeddings, vectors, retrieval behavior, or search capability.
 
 ## Local setup
 
@@ -307,18 +320,20 @@ retry with exponential backoff when the actor raises a transient error. The work
 its own SQLAlchemy session because no HTTP request dependency exists in that process.
 
 The worker independently resolves the authoritative rows, opens the file through the storage
-boundary, streams it, recalculates size and SHA-256, and compares both values with PostgreSQL. A
-missing file or checksum mismatch is permanent and moves the job to `failed` without automatic
-retry. Temporary file access failures return the job to `queued` and can run at most four total
-attempts before a safe failure code is persisted. Database outages are retried by Dramatiq; if the
-broker eventually dead-letters the message, the PostgreSQL row remains available for diagnosis and
-controlled redispatch.
+boundary, streams it, recalculates size and SHA-256, and compares both values with PostgreSQL. It
+then extracts text according to the canonical content type, normalizes that text conservatively,
+builds deterministic chunks, and commits the extraction and complete chunk set. A missing file,
+checksum mismatch, invalid UTF-8 source, malformed PDF, encrypted PDF, or source with no extractable
+text is permanent and moves the job to `failed` without repeated retry. Temporary file access
+failures return the job to `queued` and can run at most four total attempts before a safe failure
+code is persisted. Database outages are retried by Dramatiq; if the broker eventually dead-letters
+the message, the PostgreSQL row remains available for diagnosis and controlled redispatch.
 
 Dramatiq provides at-least-once delivery, not exactly-once execution. PostgreSQL advisory locks stop
-simultaneous executions of the same job. A repeated delivery sees a final `ready` or `failed` state
-and exits without changing metadata. If a worker process dies after recording `processing`, its
-database connection releases the advisory lock, so redelivery or the guarded retry endpoint can
-resume the durable job.
+simultaneous executions of the same job. A repeated delivery sees a final `ready_for_indexing` or
+`failed` state and exits without changing metadata. If a worker process dies during `verifying`,
+`extracting`, or `chunking`, its database connection releases the advisory lock, so redelivery or
+the guarded retry endpoint can restart the deterministic pipeline.
 
 PostgreSQL and Redis do not share one transaction. If the database commit succeeds but enqueueing
 fails, the upload still returns the created document, `X-Processing-Dispatch` is `pending`, and
@@ -327,8 +342,37 @@ is idempotent because duplicate delivery is safe. At higher throughput, a transa
 a dispatcher process would replace this manual recovery boundary.
 
 The API is eventually consistent: immediately after upload the document exists while its job can be
-`queued` or `processing`; later it becomes `ready` or `failed`. This keeps file verification outside
-request latency and lets API and worker capacity scale independently.
+`queued`, `verifying`, `extracting`, or `chunking`; later it becomes `ready_for_indexing` or `failed`.
+This keeps extraction outside request latency and lets API and worker capacity scale independently.
+
+## Extraction and chunking scope
+
+PDF extraction uses `pypdf` one page at a time so each resulting chunk can retain a one-based page
+reference. This is a credible baseline for text-based PDFs, but PDF text order can differ from visual
+layout and image-only PDFs require OCR, which is not implemented. File-size limits bound source
+bytes, but hostile compressed PDF structures can still consume disproportionate worker CPU or
+memory. A production worker would also need process-level time and memory limits. Markdown uses a
+CommonMark token stream from `markdown-it-py`; headings become section provenance, fenced code
+remains intact, and
+inline presentation markers are removed from the canonical text. Plain text accepts UTF-8 with an
+optional byte-order mark. Other encodings fail with a safe code rather than being guessed.
+
+Normalization applies Unicode NFC, converts line endings to `LF`, removes null bytes, trims trailing
+horizontal whitespace, and limits repeated blank lines. It deliberately avoids aggressive prose
+rewriting because source meaning matters more than cosmetic uniformity.
+
+Chunking is deterministic and structure-aware, not semantic. It keeps PDF pages and Markdown
+sections as provenance boundaries, packs natural blocks toward a 1,200-character target, enforces a
+1,800-character maximum, and uses up to 160 characters of overlap only when an oversized block must
+be split. Character limits are easy to reproduce and model-independent, but a future embedding model
+may require token-aware limits. Changing chunk policy does not require parsing the original file
+again because PostgreSQL retains the canonical normalized extraction.
+
+The final write deletes the previous extraction and chunks and inserts the replacement set in one
+PostgreSQL transaction. A failed commit rolls back the whole replacement, so readers never observe a
+half-old, half-new canonical set. Stage status is committed separately for observability, so a failed
+reprocessing attempt can leave the job in `chunking` while the last complete canonical set remains
+available for diagnosis.
 
 ## Authentication scope
 
@@ -361,12 +405,15 @@ recovery, email verification, and stronger operational secret management also re
    that copied knowledge-base ID, and choose a small `.txt`, `.md`, or valid `.pdf` file. A `.txt`
    file is the least platform-dependent manual sample.
 10. Copy the returned document `id`. Call `GET /documents/{document_id}/ingestion-job` until it
-    reports `ready`. This only confirms source integrity preparation.
+    reports `ready_for_indexing`. This confirms canonical extraction and chunks exist, not that the
+    document is searchable.
 11. List metadata through `GET /knowledge-bases/{knowledge_base_id}/documents`, then retrieve it
     through `GET /documents/{document_id}`.
-12. Delete it through `DELETE /documents/{document_id}` and verify that the subsequent metadata and
+12. In a local terminal, inspect safe chunk previews without adding a public API route:
+    `uv run python scripts/inspect_document.py <document-id>`.
+13. Delete it through `DELETE /documents/{document_id}` and verify that the subsequent metadata and
     job lookups return `404`.
-13. Stop the worker and API with one `Ctrl+C` in each terminal and allow shutdown to finish.
+14. Stop the worker and API with one `Ctrl+C` in each terminal and allow shutdown to finish.
 
 A `422` from registration means the submitted body failed its displayed schema, commonly because the
 email is invalid or the password is shorter than 12 characters. A `404` from a resource route means
@@ -384,11 +431,12 @@ format example and is never created automatically.
 | `uv run uvicorn app.main:app --reload` | Start the development API |
 | `uv run uvicorn app.main:app` | Start a single-process manual Swagger session |
 | `uv run dramatiq app.workers.tasks --processes 1 --threads 4` | Start the Windows-friendly document worker |
+| `uv run python scripts/inspect_document.py <document-id>` | Inspect local canonical extraction and chunk previews |
 | `uv run pytest` | Run the PostgreSQL-backed test suite |
 | `uv run ruff check .` | Run lint checks |
 | `uv run ruff format --check .` | Verify formatting |
 | `uv run ruff format .` | Format Python files |
-| `uv run mypy app tests alembic` | Run strict static type checking |
+| `uv run mypy app tests alembic scripts` | Run strict static type checking |
 | `uv lock --check` | Verify that `uv.lock` matches `pyproject.toml` |
 
 To override the test connection for one PowerShell session:
@@ -401,8 +449,8 @@ uv run pytest
 
 ## Planned, not implemented
 
-- text extraction and format-specific parsing inside the worker pipeline
-- document normalization, deduplication, and chunking
+- OCR, richer PDF layout recovery, table extraction, and additional source formats
+- document-level deduplication and version history
 - BM25 lexical retrieval
 - embeddings, Pinecone, semantic search, hybrid retrieval, and reranking
 - LangChain, LLM providers, grounded generation, and source citations
@@ -422,6 +470,7 @@ uv run pytest
 - [ADR-007: Enforce knowledge base ownership and conceal cross-user resources](docs/decisions/0007-enforce-knowledge-base-ownership.md)
 - [ADR-008: Store document metadata and file bytes separately](docs/decisions/0008-separate-document-metadata-and-file-storage.md)
 - [ADR-009: Use Redis and Dramatiq for document processing](docs/decisions/0009-use-redis-and-dramatiq-for-document-processing.md)
+- [ADR-010: Persist canonical extraction and deterministic chunks](docs/decisions/0010-persist-canonical-extraction-and-chunks.md)
 
 The repository uses production-oriented boundaries, but it does not yet claim production readiness.
 Token revocation and rotation, account lifecycle controls, backup and recovery procedures, rate

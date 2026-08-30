@@ -7,12 +7,13 @@ import pytest
 from dramatiq import Worker
 from fastapi.testclient import TestClient
 from redis.exceptions import ConnectionError as RedisConnectionError
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 
 from app.core.security import create_access_token
 from app.db.session import session_factory
 from app.main import app
 from app.models.document import Document
+from app.models.document_chunk import DocumentChunk
 from app.models.ingestion_job import IngestionJob, IngestionJobStatus
 from app.models.knowledge_base import KnowledgeBase
 from app.models.user import User
@@ -130,7 +131,7 @@ def test_real_redis_worker_consumes_job_and_marks_valid_file_ready() -> None:
 
     assert response.status_code == 200
     job = response.json()
-    assert job["status"] == "ready"
+    assert job["status"] == "ready_for_indexing"
     assert job["attempt_count"] == 1
     assert job["started_at"] is not None
     assert job["completed_at"] is not None
@@ -142,11 +143,24 @@ def test_processing_is_idempotent_for_duplicate_delivery() -> None:
         document, _ = upload_text_document(client, headers, knowledge_base.id)
 
     first_result = process_job(document["id"])
+    with session_factory() as session:
+        first_chunk_count = session.scalar(
+            select(func.count())
+            .select_from(DocumentChunk)
+            .where(DocumentChunk.document_id == uuid.UUID(document["id"]))
+        )
     second_result = process_job(document["id"])
+    with session_factory() as session:
+        second_chunk_count = session.scalar(
+            select(func.count())
+            .select_from(DocumentChunk)
+            .where(DocumentChunk.document_id == uuid.UUID(document["id"]))
+        )
 
-    assert first_result.status == IngestionJobStatus.READY.value
-    assert second_result.status == IngestionJobStatus.READY.value
+    assert first_result.status == IngestionJobStatus.READY_FOR_INDEXING.value
+    assert second_result.status == IngestionJobStatus.READY_FOR_INDEXING.value
     assert second_result.attempt_count == 1
+    assert first_chunk_count == second_chunk_count == 1
 
 
 def test_worker_recovers_a_processing_job_left_by_a_crashed_attempt() -> None:
@@ -159,12 +173,12 @@ def test_worker_recovers_a_processing_job_left_by_a_crashed_attempt() -> None:
             select(IngestionJob).where(IngestionJob.document_id == uuid.UUID(document["id"]))
         )
         assert job is not None
-        transition_job(job, IngestionJobStatus.PROCESSING)
+        transition_job(job, IngestionJobStatus.VERIFYING)
         job.attempt_count = 1
         session.commit()
 
     recovered = process_job(document["id"])
-    assert recovered.status == IngestionJobStatus.READY.value
+    assert recovered.status == IngestionJobStatus.READY_FOR_INDEXING.value
     assert recovered.attempt_count == 2
 
 
@@ -178,7 +192,7 @@ def test_retry_recovers_processing_state_when_no_worker_holds_the_job_lock() -> 
                 select(IngestionJob).where(IngestionJob.document_id == uuid.UUID(document["id"]))
             )
             assert job is not None
-            transition_job(job, IngestionJobStatus.PROCESSING)
+            transition_job(job, IngestionJobStatus.VERIFYING)
             job.attempt_count = 1
             session.commit()
 
@@ -202,7 +216,7 @@ def test_retry_does_not_compete_with_an_active_worker_lock() -> None:
                 select(IngestionJob).where(IngestionJob.document_id == uuid.UUID(document["id"]))
             )
             assert job is not None
-            transition_job(job, IngestionJobStatus.PROCESSING)
+            transition_job(job, IngestionJobStatus.VERIFYING)
             job.attempt_count = 1
             lock_session.commit()
             lock_key = int.from_bytes(job.id.bytes[:8], byteorder="big", signed=True)
@@ -302,7 +316,7 @@ def test_failed_job_can_be_retried_but_ready_job_cannot() -> None:
                 select(IngestionJob).where(IngestionJob.document_id == uuid.UUID(document["id"]))
             )
             assert job is not None
-            transition_job(job, IngestionJobStatus.PROCESSING)
+            transition_job(job, IngestionJobStatus.VERIFYING)
             job.attempt_count = 1
             transition_job(job, IngestionJobStatus.FAILED)
             job.failure_code = "stored_file_missing"
@@ -344,9 +358,31 @@ def test_job_status_and_retry_preserve_cross_user_non_disclosure() -> None:
 
 
 def test_state_machine_rejects_illegal_transitions() -> None:
-    job = IngestionJob(document_id=uuid.uuid4(), status=IngestionJobStatus.READY.value)
+    job = IngestionJob(
+        document_id=uuid.uuid4(),
+        status=IngestionJobStatus.READY_FOR_INDEXING.value,
+    )
     with pytest.raises(InvalidJobTransition):
-        transition_job(job, IngestionJobStatus.PROCESSING)
+        transition_job(job, IngestionJobStatus.VERIFYING)
+
+
+def test_state_machine_accepts_the_complete_preparation_sequence() -> None:
+    job = IngestionJob(
+        document_id=uuid.uuid4(),
+        status=IngestionJobStatus.QUEUED.value,
+    )
+
+    for target in (
+        IngestionJobStatus.VERIFYING,
+        IngestionJobStatus.EXTRACTING,
+        IngestionJobStatus.CHUNKING,
+        IngestionJobStatus.READY_FOR_INDEXING,
+    ):
+        transition_job(job, target)
+
+    assert job.status == IngestionJobStatus.READY_FOR_INDEXING.value
+    assert job.started_at is not None
+    assert job.completed_at is not None
 
 
 def test_worker_ignores_malformed_and_unknown_job_ids() -> None:

@@ -8,6 +8,8 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
 
 if TYPE_CHECKING:
+    from app.models.document_chunk import DocumentChunk
+    from app.models.document_extraction import DocumentExtraction
     from app.models.ingestion_job import IngestionJob
     from app.models.knowledge_base import KnowledgeBase
 
@@ -57,4 +59,16 @@ class Document(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
         uselist=False,
+    )
+    extraction: Mapped["DocumentExtraction | None"] = relationship(
+        back_populates="document",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        uselist=False,
+    )
+    chunks: Mapped[list["DocumentChunk"]] = relationship(
+        back_populates="document",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="DocumentChunk.ordinal",
     )

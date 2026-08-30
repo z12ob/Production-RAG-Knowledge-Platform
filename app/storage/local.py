@@ -1,6 +1,8 @@
 import hashlib
 import logging
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
@@ -108,6 +110,17 @@ class LocalFileStorage:
         except OSError as error:
             raise StorageUnavailable from error
         return StoredFile(size_bytes=size_bytes, checksum_sha256=checksum.hexdigest())
+
+    @contextmanager
+    def open_binary(self, storage_key: str) -> Iterator[BinaryIO]:
+        path = self._path_for(storage_key)
+        try:
+            with path.open("rb") as source:
+                yield source
+        except FileNotFoundError as error:
+            raise StoredFileMissing from error
+        except OSError as error:
+            raise StorageUnavailable from error
 
     def stage_delete(self, storage_key: str) -> StagedDeletion:
         original_path = self._path_for(storage_key)

@@ -28,8 +28,8 @@ class IngestionJobResponse(BaseModel):
         IngestionJobStatus,
         Field(
             description=(
-                "READY means file integrity checks passed and the source is ready for future "
-                "extraction. It does not mean the document is searchable."
+                "READY_FOR_INDEXING means extraction, normalization, and canonical chunk "
+                "persistence succeeded. It does not mean the document is indexed or searchable."
             )
         ),
     ]

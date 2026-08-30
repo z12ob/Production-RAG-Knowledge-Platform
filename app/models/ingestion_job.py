@@ -14,8 +14,10 @@ if TYPE_CHECKING:
 
 class IngestionJobStatus(StrEnum):
     QUEUED = "queued"
-    PROCESSING = "processing"
-    READY = "ready"
+    VERIFYING = "verifying"
+    EXTRACTING = "extracting"
+    CHUNKING = "chunking"
+    READY_FOR_INDEXING = "ready_for_indexing"
     FAILED = "failed"
 
 
@@ -23,7 +25,8 @@ class IngestionJob(Base):
     __tablename__ = "ingestion_jobs"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('queued', 'processing', 'ready', 'failed')",
+            "status IN "
+            "('queued', 'verifying', 'extracting', 'chunking', 'ready_for_indexing', 'failed')",
             name="status_valid",
         ),
         CheckConstraint("attempt_count >= 0", name="attempt_count_nonnegative"),
@@ -36,7 +39,7 @@ class IngestionJob(Base):
             name="failure_code_matches_status",
         ),
         CheckConstraint(
-            "(status IN ('ready', 'failed')) = (completed_at IS NOT NULL)",
+            "(status IN ('ready_for_indexing', 'failed')) = (completed_at IS NOT NULL)",
             name="completion_matches_status",
         ),
     )
@@ -49,7 +52,7 @@ class IngestionJob(Base):
         unique=True,
     )
     status: Mapped[str] = mapped_column(
-        String(20),
+        String(32),
         nullable=False,
         default=IngestionJobStatus.QUEUED.value,
         server_default=IngestionJobStatus.QUEUED.value,

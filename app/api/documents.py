@@ -306,8 +306,8 @@ def get_document(
     response_model=IngestionJobResponse,
     summary="Get document processing status",
     description=(
-        "READY means source-file integrity checks passed. It does not mean the document has been "
-        "parsed, chunked, indexed, or made searchable."
+        "READY_FOR_INDEXING means extraction, normalization, and canonical chunk persistence "
+        "succeeded. It does not mean the document has been indexed or made searchable."
     ),
 )
 def get_ingestion_job(
@@ -345,14 +345,16 @@ def retry_ingestion_job(
     response: Response,
 ) -> IngestionJob:
     job = find_ingestion_job(document_id, current_user.id, session)
-    if job.status == IngestionJobStatus.READY.value:
+    if job.status == IngestionJobStatus.READY_FOR_INDEXING.value:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="The document is already ready for the extraction pipeline.",
+            detail="The document is already prepared for the future indexing pipeline.",
         )
     if job.status in {
         IngestionJobStatus.FAILED.value,
-        IngestionJobStatus.PROCESSING.value,
+        IngestionJobStatus.VERIFYING.value,
+        IngestionJobStatus.EXTRACTING.value,
+        IngestionJobStatus.CHUNKING.value,
     }:
         try:
             reset_job_for_retry(session, job)
